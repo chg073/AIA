@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getStockQuote, getDailyData } from "@/lib/alpha-vantage";
+import { getStockQuote, getDailyData, calculateRSI } from "@/lib/alpha-vantage";
 import { analyzeStock } from "@/lib/gemini";
-import type { Transaction, Profile } from "@/types";
+import { computeExitScore } from "@/lib/exit-score";
+import type { Transaction, Profile, Suggestion, StockDailyData } from "@/types";
 
 export async function POST(request: Request) {
   try {
@@ -111,6 +112,34 @@ export async function POST(request: Request) {
       existingPositions: (transactions || []) as Transaction[],
     });
 
+    // Get previous suggestion trend for exit score comparison
+    const { data: prevSuggestion } = await supabase
+      .from("suggestions")
+      .select("technical_summary")
+      .eq("user_id", user.id)
+      .eq("symbol", symbol.toUpperCase())
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    const currentPrice = (quote as { price: number }).price;
+    const dailyArr = dailyData as StockDailyData[];
+    const rsi = calculateRSI(dailyArr, 14);
+
+    const { score: exitScore, details: exitScoreDetails } = computeExitScore({
+      rsi,
+      currentPrice,
+      suggestedSellPrice: analysis.suggested_sell_price,
+      stopLossPrice: analysis.stop_loss_price,
+      resistanceLevels: analysis.technical_summary.resistance_levels ?? [],
+      currentTrend: analysis.technical_summary.trend ?? "neutral",
+      previousTrend:
+        (prevSuggestion?.technical_summary as Suggestion["technical_summary"])
+          ?.trend ?? null,
+      dailyData: dailyArr,
+    });
+
     // Deactivate previous suggestions for this stock
     await supabase
       .from("suggestions")
@@ -130,12 +159,15 @@ export async function POST(request: Request) {
         suggested_buy_price: analysis.suggested_buy_price,
         suggested_sell_price: analysis.suggested_sell_price,
         stop_loss_price: analysis.stop_loss_price,
-        current_price: (quote as { price: number }).price,
+        current_price: currentPrice,
         risk_estimation: analysis.risk_estimation,
         reasoning: analysis.reasoning,
         technical_summary: analysis.technical_summary,
         confidence: analysis.confidence,
         time_horizon: analysis.time_horizon,
+        options_strategy: analysis.options_strategy,
+        exit_score: exitScore,
+        exit_score_details: exitScoreDetails,
         is_active: true,
         expires_at: new Date(
           Date.now() + 24 * 60 * 60 * 1000

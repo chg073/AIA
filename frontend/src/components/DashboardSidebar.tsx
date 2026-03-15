@@ -8,7 +8,7 @@ import {
   LayoutDashboard,
   List,
   Lightbulb,
-  ArrowLeftRight,
+  Briefcase,
   Settings,
   LogOut,
   Menu,
@@ -18,11 +18,7 @@ const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/watchlist", label: "Watchlist", icon: List },
   { href: "/dashboard/suggestions", label: "Suggestions", icon: Lightbulb },
-  {
-    href: "/dashboard/transactions",
-    label: "Transactions",
-    icon: ArrowLeftRight,
-  },
+  { href: "/dashboard/portfolio", label: "Portfolio", icon: Briefcase },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 

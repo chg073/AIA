@@ -6,6 +6,11 @@ export type TransactionType = "buy" | "sell";
 export type TransactionStatus = "active" | "closed" | "pending";
 export type InstrumentType = "stock" | "call_option" | "put_option";
 
+export interface AlertPreferences {
+  exit_score_threshold: number;
+  options_expiry_days: number;
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -15,6 +20,7 @@ export interface Profile {
   investment_style: InvestmentStyle;
   preferred_sectors: string[];
   notifications_enabled: boolean;
+  alert_preferences: AlertPreferences;
   created_at: string;
   updated_at: string;
 }
@@ -27,6 +33,21 @@ export interface WatchlistItem {
   is_active: boolean;
   notes: string | null;
   added_at: string;
+}
+
+export interface OptionsStrategy {
+  recommendation: string | null;
+  strategy_type: "protective_put" | "covered_call" | "collar" | "spread" | "none";
+  details: string | null;
+}
+
+export interface ExitScoreDetails {
+  rsi_component: number;
+  resistance_component: number;
+  sell_target_component: number;
+  stop_loss_component: number;
+  trend_component: number;
+  volume_component: number;
 }
 
 export interface Suggestion {
@@ -44,10 +65,42 @@ export interface Suggestion {
   technical_summary: TechnicalSummary;
   confidence: number | null;
   time_horizon: string | null;
+  options_strategy: OptionsStrategy | null;
+  exit_score: number;
+  exit_score_details: ExitScoreDetails;
   notification_sent: boolean;
   is_active: boolean;
   created_at: string;
   expires_at: string | null;
+}
+
+export interface SuggestionMessage {
+  id: string;
+  suggestion_id: string;
+  user_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export type AlertType =
+  | "price_target_hit"
+  | "stop_loss_hit"
+  | "exit_score_high"
+  | "action_changed"
+  | "options_expiry_warning";
+
+export interface Alert {
+  id: string;
+  user_id: string;
+  symbol: string;
+  alert_type: AlertType;
+  title: string;
+  message: string;
+  metadata: Record<string, unknown>;
+  is_read: boolean;
+  email_sent: boolean;
+  created_at: string;
 }
 
 export interface TechnicalSummary {
@@ -140,4 +193,5 @@ export interface AnalysisResponse {
   technical_summary: TechnicalSummary;
   confidence: number;
   time_horizon: string;
+  options_strategy: OptionsStrategy | null;
 }

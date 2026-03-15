@@ -4,7 +4,7 @@ import {
   TrendingDown,
   Eye,
   Lightbulb,
-  ArrowLeftRight,
+  Briefcase,
   DollarSign,
 } from "lucide-react";
 import { formatCurrency, getSignalColor, getActionColor } from "@/lib/utils";
@@ -81,10 +81,10 @@ export default async function DashboardPage() {
           color="text-yellow-400"
         />
         <StatCard
-          icon={<ArrowLeftRight className="h-5 w-5" />}
-          label="Transactions"
-          value={transactions.length.toString()}
-          subtitle="total trades"
+          icon={<Briefcase className="h-5 w-5" />}
+          label="Positions"
+          value={countActivePositions(transactions).toString()}
+          subtitle="active holdings"
           color="text-purple-400"
         />
         <StatCard
@@ -153,12 +153,12 @@ export default async function DashboardPage() {
         {/* Recent Transactions */}
         <div className="bg-card border border-border rounded-xl p-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Recent Transactions</h2>
+            <h2 className="text-lg font-semibold">Recent Trades</h2>
             <Link
-              href="/dashboard/transactions"
+              href="/dashboard/portfolio"
               className="text-sm text-primary hover:underline"
             >
-              View all
+              View portfolio
             </Link>
           </div>
           {transactions.length === 0 ? (
@@ -285,4 +285,18 @@ function calculatePnL(transactions: Transaction[]) {
   });
 
   return { totalInvested, totalReturns };
+}
+
+function countActivePositions(transactions: Transaction[]): number {
+  const netBySymbol = new Map<string, number>();
+  transactions
+    .filter((t) => t.instrument_type === "stock")
+    .forEach((t) => {
+      const current = netBySymbol.get(t.symbol) || 0;
+      netBySymbol.set(
+        t.symbol,
+        current + (t.type === "buy" ? t.quantity : -t.quantity)
+      );
+    });
+  return Array.from(netBySymbol.values()).filter((qty) => qty !== 0).length;
 }

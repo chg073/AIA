@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { Loader2, Save, User, Shield, Bell } from "lucide-react";
-import type { Profile, RiskLevel, InvestmentStyle } from "@/types";
+import { Loader2, Save, User, Shield, Bell, Target } from "lucide-react";
+import type { Profile, RiskLevel, InvestmentStyle, AlertPreferences } from "@/types";
 
 export default function SettingsPage() {
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -51,6 +51,7 @@ export default function SettingsPage() {
         risk_level: profile.risk_level,
         investment_style: profile.investment_style,
         notifications_enabled: profile.notifications_enabled,
+        alert_preferences: profile.alert_preferences,
         updated_at: new Date().toISOString(),
       })
       .eq("id", profile.id);
@@ -255,6 +256,78 @@ export default function SettingsPage() {
               />
             </div>
           </label>
+        </div>
+
+        {/* Alert Preferences */}
+        <div className="bg-card border border-border rounded-xl p-6 space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Target className="h-5 w-5 text-primary" />
+            <h2 className="text-lg font-semibold">Alert Preferences</h2>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1.5">
+              Exit Score Alert Threshold
+            </label>
+            <div className="flex items-center gap-4">
+              <input
+                type="range"
+                min="30"
+                max="90"
+                value={profile.alert_preferences?.exit_score_threshold ?? 61}
+                onChange={(e) =>
+                  setProfile({
+                    ...profile,
+                    alert_preferences: {
+                      ...(profile.alert_preferences ?? {
+                        exit_score_threshold: 61,
+                        options_expiry_days: 7,
+                      }),
+                      exit_score_threshold: parseInt(e.target.value),
+                    },
+                  })
+                }
+                className="flex-1 accent-primary"
+              />
+              <span className="text-sm font-medium w-12 text-right">
+                {profile.alert_preferences?.exit_score_threshold ?? 61}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Alert when a position&apos;s exit score reaches this threshold
+              (default: 61)
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-1.5">
+              Options Expiry Warning
+            </label>
+            <select
+              value={profile.alert_preferences?.options_expiry_days ?? 7}
+              onChange={(e) =>
+                setProfile({
+                  ...profile,
+                  alert_preferences: {
+                    ...(profile.alert_preferences ?? {
+                      exit_score_threshold: 61,
+                      options_expiry_days: 7,
+                    }),
+                    options_expiry_days: parseInt(e.target.value),
+                  },
+                })
+              }
+              className="w-full bg-input border border-border rounded-lg px-4 py-2.5 text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
+            >
+              <option value="1">1 day before expiry</option>
+              <option value="3">3 days before expiry</option>
+              <option value="7">7 days before expiry</option>
+              <option value="14">14 days before expiry</option>
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">
+              When to alert you about expiring options contracts
+            </p>
+          </div>
         </div>
 
         <button

@@ -52,7 +52,7 @@ function getGeminiKey(): string {
 
 // ─── Technical indicators ────────────────────────────────────────────────────
 
-function buildTechnicalIndicators(data: StockDailyData[]) {
+export function buildTechnicalIndicators(data: StockDailyData[]) {
   return {
     sma_20: calculateSMA(data, 20),
     sma_50: calculateSMA(data, 50),
@@ -157,6 +157,12 @@ ${request.existingPositions.length > 0
       }).join("\n")
     : "None"}
 
+## Options Strategy Rules
+- If the user holds shares, suggest relevant options strategies: protective puts (to hedge downside), covered calls (to generate income), or collars (for range-bound protection).
+- If the user holds options, factor in their expiry date and strike price when recommending actions. Warn if expiry is approaching.
+- If the user has no position, you may suggest options as an alternative entry strategy (e.g., selling cash-secured puts).
+- Set options_strategy to null if no options play is relevant.
+
 ## Output
 Respond ONLY with a valid JSON object — no markdown, no code fences, no extra text:
 
@@ -176,7 +182,12 @@ Respond ONLY with a valid JSON object — no markdown, no code fences, no extra 
     "key_indicators": "<brief summary of which indicators drove this recommendation>"
   },
   "confidence": <0.0 to 1.0>,
-  "time_horizon": "<must match the ${investment_style} style rules above>"
+  "time_horizon": "<must match the ${investment_style} style rules above>",
+  "options_strategy": {
+    "recommendation": "<1-2 sentence options recommendation, or null if none>",
+    "strategy_type": "protective_put|covered_call|collar|spread|none",
+    "details": "<specific strike, expiry suggestion, premium estimate if applicable, or null>"
+  }
 }`;
 }
 
@@ -235,6 +246,17 @@ export function sanitizeAnalysis(
 
     confidence:   typeof raw.confidence   === "number" ? Math.min(1, Math.max(0, raw.confidence)) : 0.5,
     time_horizon: raw.time_horizon?.trim() || "N/A",
+
+    options_strategy: raw.options_strategy
+      ? {
+          recommendation: raw.options_strategy.recommendation ?? null,
+          strategy_type: (["protective_put", "covered_call", "collar", "spread", "none"] as const)
+            .includes(raw.options_strategy.strategy_type as "protective_put" | "covered_call" | "collar" | "spread" | "none")
+            ? raw.options_strategy.strategy_type
+            : "none",
+          details: raw.options_strategy.details ?? null,
+        }
+      : null,
   };
 }
 
@@ -514,4 +536,144 @@ export async function analyzeStock(request: AnalysisRequest): Promise<AnalysisRe
     return analyzeWithGemini(request);
   }
   return analyzeWithGroq(request);
+}
+
+// ─── Conversation follow-up ──────────────────────────────────────────────────
+
+export interface ChatContext {
+  suggestion: {
+    symbol: string;
+    action: string;
+    signal_level: string;
+    reasoning: string;
+    suggested_buy_price: number | null;
+    suggested_sell_price: number | null;
+    stop_loss_price: number | null;
+    risk_estimation: string | null;
+    current_price: number | null;
+    technical_summary: Record<string, unknown>;
+    options_strategy: Record<string, unknown> | null;
+    time_horizon: string | null;
+  };
+  positions: Array<{
+    type: string;
+    instrument_type: string;
+    quantity: number;
+    price: number;
+    contracts?: number | null;
+    strike_price?: number | null;
+    expiration_date?: string | null;
+    status: string;
+  }>;
+  conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
+  userPreferences: { risk_level: string; investment_style: string };
+}
+
+function buildChatPrompt(ctx: ChatContext, userMessage: string): string {
+  const s = ctx.suggestion;
+  const positionsText = ctx.positions.length > 0
+    ? ctx.positions.map((t) => {
+        if (t.instrument_type === "call_option" || t.instrument_type === "put_option") {
+          const kind = t.instrument_type === "call_option" ? "CALL" : "PUT";
+          return `- ${t.type.toUpperCase()} ${t.contracts} ${kind} contract(s) · Strike $${(t.strike_price ?? 0).toFixed(2)} · Expires ${t.expiration_date} · Premium $${t.price.toFixed(2)}/sh (${t.status})`;
+        }
+        return `- ${t.type.toUpperCase()} ${t.quantity} shares @ $${t.price.toFixed(2)} (${t.status})`;
+      }).join("\n")
+    : "None";
+
+  const historyText = ctx.conversationHistory
+    .map((m) => `${m.role === "user" ? "User" : "Advisor"}: ${m.content}`)
+    .join("\n\n");
+
+  return `You are an expert financial advisor having a conversation about ${s.symbol}. Answer the user's question using the context below. Be concise but thorough. You may suggest options strategies when relevant.
+
+## User Profile
+- Risk Level: ${ctx.userPreferences.risk_level}
+- Investment Style: ${ctx.userPreferences.investment_style}
+
+## Latest AI Analysis for ${s.symbol}
+- Action: ${s.action} | Signal: ${s.signal_level} | Confidence: N/A
+- Current Price: ${s.current_price ? `$${s.current_price.toFixed(2)}` : "N/A"}
+- Buy Target: ${s.suggested_buy_price ? `$${s.suggested_buy_price.toFixed(2)}` : "N/A"}
+- Sell Target: ${s.suggested_sell_price ? `$${s.suggested_sell_price.toFixed(2)}` : "N/A"}
+- Stop Loss: ${s.stop_loss_price ? `$${s.stop_loss_price.toFixed(2)}` : "N/A"}
+- Risk: ${s.risk_estimation ?? "N/A"} | Time Horizon: ${s.time_horizon ?? "N/A"}
+- Reasoning: ${s.reasoning}
+${s.options_strategy ? `- Options Strategy: ${JSON.stringify(s.options_strategy)}` : ""}
+
+## User's Positions in ${s.symbol}
+${positionsText}
+
+## Conversation History
+${historyText || "(This is the start of the conversation)"}
+
+## User's Question
+${userMessage}
+
+Respond in plain text (not JSON). Be specific with numbers and actionable advice.`;
+}
+
+async function callAIChat(prompt: string): Promise<string> {
+  const provider = getProvider();
+
+  if (provider === "gemini") {
+    const apiKey = getGeminiKey();
+    const available = await listAvailableModels(apiKey);
+    const candidates = rankModels(available);
+
+    for (const model of candidates) {
+      for (const version of ["v1beta", "v1"]) {
+        const url = `${GEMINI_BASE}/${version}/models/${model}:generateContent?key=${apiKey}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.4, maxOutputTokens: 1024 },
+          }),
+        });
+        if (res.ok) {
+          const result = await res.json();
+          const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) return text;
+          break;
+        }
+        if (res.status === 429) throw new Error("Gemini rate limit hit");
+        if (res.status === 404) continue;
+        break;
+      }
+    }
+    throw new Error("All Gemini models failed for chat");
+  }
+
+  // Groq
+  const apiKey = getGroqKey();
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.4,
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Groq API error (${response.status}): ${err}`);
+  }
+
+  const result = await response.json();
+  const text = result.choices?.[0]?.message?.content;
+  if (!text) throw new Error("No response from Groq");
+  return text;
+}
+
+export async function chatWithSuggestion(ctx: ChatContext, userMessage: string): Promise<string> {
+  const prompt = buildChatPrompt(ctx, userMessage);
+  return callAIChat(prompt);
 }
