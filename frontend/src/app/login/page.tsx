@@ -116,10 +116,7 @@ export default function LoginPage() {
         </form>
 
         <p className="text-center text-muted-foreground text-sm mt-6">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="text-primary hover:underline">
-            Sign up
-          </Link>
+          Registration is currently closed.
         </p>
       </div>
     </div>

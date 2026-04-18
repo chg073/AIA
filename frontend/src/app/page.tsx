@@ -18,20 +18,12 @@ export default function HomePage() {
             <TrendingUp className="h-7 w-7 text-primary" />
             <span className="text-xl font-bold">AIA</span>
           </div>
-          <div className="flex items-center gap-4">
-            <Link
-              href="/login"
-              className="text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Sign In
-            </Link>
-            <Link
-              href="/signup"
-              className="bg-primary hover:bg-primary/90 text-primary-foreground px-4 py-2 rounded-lg transition-colors font-medium"
-            >
-              Get Started
-            </Link>
-          </div>
+          <Link
+            href="/login"
+            className="bg-primary hover:bg-primary/90 text-primary-foreground px-4 py-2 rounded-lg transition-colors font-medium"
+          >
+            Sign In
+          </Link>
         </div>
       </nav>
 
@@ -53,16 +45,10 @@ export default function HomePage() {
         </p>
         <div className="flex items-center justify-center gap-4">
           <Link
-            href="/signup"
+            href="/login"
             className="bg-primary hover:bg-primary/90 text-primary-foreground px-8 py-3 rounded-lg transition-colors font-medium text-lg flex items-center gap-2"
           >
-            Start Free <ArrowRight className="h-5 w-5" />
-          </Link>
-          <Link
-            href="/login"
-            className="border border-border hover:border-primary/50 px-8 py-3 rounded-lg transition-colors text-lg"
-          >
-            Sign In
+            Sign In <ArrowRight className="h-5 w-5" />
           </Link>
         </div>
       </section>
