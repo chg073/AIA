@@ -424,17 +424,19 @@ async function analyzeWithGemini(request: LongTermAnalysisRequest): Promise<Anal
   const apiKey = getGeminiKey();
   const prompt = buildPrompt(request);
 
-  // Step 1: Discover available models
-  const available = await listAvailableModels(apiKey);
-
-  // Build ranked candidate list: preferred order first, then any remaining
-  const candidates = rankModels(available);
+  // Pin a specific model via GEMINI_MODEL env var; otherwise auto-discover & rank.
+  const pinned = process.env.GEMINI_MODEL?.trim();
+  let candidates: string[];
+  if (pinned) {
+    candidates = [pinned];
+  } else {
+    const available = await listAvailableModels(apiKey);
+    candidates = rankModels(available);
+  }
 
   if (candidates.length === 0) {
-    const allNames = available.map((m) => m.name.replace("models/", "")).join(", ");
     throw new Error(
-      `No Gemini model supports text generateContent for your API key. ` +
-      `Available models: [${allNames || "none"}]. ` +
+      `No Gemini model available. ` +
       `Make sure billing is enabled and the Generative Language API is active. ` +
       `Or set AI_PROVIDER=groq in .env.local as a free alternative.`
     );
@@ -637,8 +639,10 @@ async function callAIChat(prompt: string): Promise<string> {
 
   if (provider === "gemini") {
     const apiKey = getGeminiKey();
-    const available = await listAvailableModels(apiKey);
-    const candidates = rankModels(available);
+    const pinned = process.env.GEMINI_MODEL?.trim();
+    const candidates = pinned
+      ? [pinned]
+      : rankModels(await listAvailableModels(apiKey));
 
     for (const model of candidates) {
       for (const version of ["v1beta", "v1"]) {

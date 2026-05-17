@@ -326,30 +326,38 @@ async function callGemini(prompt: string): Promise<string> {
   const key = Deno.env.get("GEMINI_API_KEY");
   if (!key) throw new Error("GEMINI_API_KEY not set in Edge Function secrets");
   const BASE = "https://generativelanguage.googleapis.com";
-  const modelsRes = await fetch(`${BASE}/v1beta/models?key=${key}`);
-  if (!modelsRes.ok) throw new Error(`Gemini model discovery failed (${modelsRes.status})`);
-  const modelsData = await modelsRes.json();
-  const EXCLUDE = ["tts", "imagen", "veo", "embedding", "aqa", "bisheng"];
-  const candidates = (modelsData.models ?? [])
-    .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
-      m.supportedGenerationMethods?.includes("generateContent") &&
-      !EXCLUDE.some((p) => m.name.toLowerCase().includes(p))
-    )
-    .map((m: { name: string }) => m.name.replace("models/", ""))
-    .sort((a: string, b: string) => {
-      const score = (m: string) => {
-        const lm = m.toLowerCase();
-        let s = 0;
-        if (lm.includes("latest")) s += 10000;
-        const v = lm.match(/gemini-(\d+(?:\.\d+)?)/);
-        if (v) s += parseFloat(v[1]) * 1000;
-        if (lm.includes("flash")) s += 100;
-        if (!lm.includes("preview") && !lm.includes("exp")) s += 50;
-        else if (lm.includes("preview")) s += 20;
-        return s;
-      };
-      return score(b) - score(a);
-    });
+
+  // Pin a specific model via GEMINI_MODEL env var; otherwise auto-discover & rank.
+  const pinned = Deno.env.get("GEMINI_MODEL")?.trim();
+  let candidates: string[];
+  if (pinned) {
+    candidates = [pinned];
+  } else {
+    const modelsRes = await fetch(`${BASE}/v1beta/models?key=${key}`);
+    if (!modelsRes.ok) throw new Error(`Gemini model discovery failed (${modelsRes.status})`);
+    const modelsData = await modelsRes.json();
+    const EXCLUDE = ["tts", "imagen", "veo", "embedding", "aqa", "bisheng"];
+    candidates = (modelsData.models ?? [])
+      .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
+        m.supportedGenerationMethods?.includes("generateContent") &&
+        !EXCLUDE.some((p) => m.name.toLowerCase().includes(p))
+      )
+      .map((m: { name: string }) => m.name.replace("models/", ""))
+      .sort((a: string, b: string) => {
+        const score = (m: string) => {
+          const lm = m.toLowerCase();
+          let s = 0;
+          if (lm.includes("latest")) s += 10000;
+          const v = lm.match(/gemini-(\d+(?:\.\d+)?)/);
+          if (v) s += parseFloat(v[1]) * 1000;
+          if (lm.includes("flash")) s += 100;
+          if (!lm.includes("preview") && !lm.includes("exp")) s += 50;
+          else if (lm.includes("preview")) s += 20;
+          return s;
+        };
+        return score(b) - score(a);
+      });
+  }
   for (const model of candidates) {
     for (const version of ["v1beta", "v1"]) {
       const url = `${BASE}/${version}/models/${model}:generateContent?key=${key}`;
@@ -368,7 +376,10 @@ async function callGemini(prompt: string): Promise<string> {
       if (res.ok) {
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) return text;
+        if (text) {
+          console.log(`[discover-stocks] Gemini model used: ${model} (${version})`);
+          return text;
+        }
         break;
       }
       if (res.status === 429) throw new Error("Gemini rate limit hit");
