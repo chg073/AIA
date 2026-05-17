@@ -95,9 +95,10 @@ async function fetchStockData(symbol: string): Promise<{ quote: StockQuote; dail
   const YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart";
   const headers = { "User-Agent": "Mozilla/5.0", Accept: "application/json" };
 
+  // Long-term lens: pull 5y so SMA200, weekly RSI, 1y/3y returns are all computable
   const [quoteRes, historyRes] = await Promise.all([
     fetch(`${YF_BASE}/${encodeURIComponent(symbol)}?interval=1d&range=1d`, { headers }),
-    fetch(`${YF_BASE}/${encodeURIComponent(symbol)}?interval=1d&range=3mo`, { headers }),
+    fetch(`${YF_BASE}/${encodeURIComponent(symbol)}?interval=1d&range=5y`, { headers }),
   ]);
 
   if (!quoteRes.ok || !historyRes.ok) {
@@ -201,34 +202,201 @@ function calcMACD(data: StockDailyData[]) {
   return { macd, signal, histogram: macd - signal };
 }
 
+// ─── Long-term metrics ──────────────────────────────────────────────────────
+
+function resampleToWeekly(data: StockDailyData[]): StockDailyData[] {
+  if (data.length === 0) return [];
+  const buckets = new Map<string, StockDailyData[]>();
+  for (const d of data) {
+    const date = new Date(d.date + "T00:00:00Z");
+    const day = date.getUTCDay();
+    const offsetToFri = (5 - day + 7) % 7;
+    const friday = new Date(date);
+    friday.setUTCDate(date.getUTCDate() + offsetToFri);
+    const key = friday.toISOString().split("T")[0];
+    const arr = buckets.get(key) ?? [];
+    arr.push(d);
+    buckets.set(key, arr);
+  }
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, bars]) => ({
+      date,
+      open: bars[0].open,
+      high: Math.max(...bars.map((b) => b.high)),
+      low: Math.min(...bars.map((b) => b.low)),
+      close: bars[bars.length - 1].close,
+      volume: bars.reduce((s, b) => s + b.volume, 0),
+    }));
+}
+
+function returnOverDays(data: StockDailyData[], days: number): number | null {
+  if (data.length < days + 1) return null;
+  const now = data[data.length - 1].close;
+  const past = data[data.length - 1 - days].close;
+  if (past <= 0) return null;
+  return (now - past) / past;
+}
+
+interface LongTermMetrics {
+  return_1m: number | null;
+  return_3m: number | null;
+  return_6m: number | null;
+  return_1y: number | null;
+  return_3y: number | null;
+  return_ytd: number | null;
+  rsi_weekly: number | null;
+  sma_50: number | null;
+  sma_200: number | null;
+  golden_cross: boolean;
+  high_52w: number | null;
+  low_52w: number | null;
+  distance_from_52w_high: number | null;
+  volume_surge_ratio: number | null;
+}
+
+function buildLongTermMetrics(data: StockDailyData[]): LongTermMetrics {
+  const weekly = resampleToWeekly(data);
+  const sma50 = calcSMA(data, 50);
+  const sma200 = calcSMA(data, 200);
+
+  const last252 = data.slice(-252);
+  const high52 = last252.length > 0 ? Math.max(...last252.map((d) => d.high)) : null;
+  const low52 = last252.length > 0 ? Math.min(...last252.map((d) => d.low)) : null;
+  const lastClose = data.length > 0 ? data[data.length - 1].close : null;
+  const distFromHigh =
+    high52 !== null && lastClose !== null && high52 > 0
+      ? (lastClose - high52) / high52
+      : null;
+
+  const avg = (slice: StockDailyData[]) =>
+    slice.length === 0 ? 0 : slice.reduce((s, d) => s + d.volume, 0) / slice.length;
+  const recentAvgVol = avg(data.slice(-30));
+  const yearAvgVol = avg(data.slice(-252));
+  const volumeSurge = yearAvgVol > 0 ? recentAvgVol / yearAvgVol : null;
+
+  const year = data.length > 0 ? new Date(data[data.length - 1].date).getUTCFullYear() : null;
+  let ytdReturn: number | null = null;
+  if (year !== null) {
+    const firstOfYear = data.find((d) => new Date(d.date).getUTCFullYear() === year);
+    if (firstOfYear && lastClose !== null && firstOfYear.close > 0) {
+      ytdReturn = (lastClose - firstOfYear.close) / firstOfYear.close;
+    }
+  }
+
+  return {
+    return_1m: returnOverDays(data, 21),
+    return_3m: returnOverDays(data, 63),
+    return_6m: returnOverDays(data, 126),
+    return_1y: returnOverDays(data, 252),
+    return_3y: returnOverDays(data, 756),
+    return_ytd: ytdReturn,
+    rsi_weekly: calcRSI(weekly, 14),
+    sma_50: sma50,
+    sma_200: sma200,
+    golden_cross: sma50 !== null && sma200 !== null ? sma50 > sma200 : false,
+    high_52w: high52,
+    low_52w: low52,
+    distance_from_52w_high: distFromHigh,
+    volume_surge_ratio: volumeSurge,
+  };
+}
+
 // ─── AI Prompt ────────────────────────────────────────────────────────────────
 
-function buildPrompt(symbol: string, quote: StockQuote, daily: StockDailyData[], prefs: UserPreferences, positions: TransactionRecord[] = []): string {
+interface PriorSuggestion {
+  action: string;
+  signal_level: string;
+  reasoning: string;
+  suggested_buy_price: number | null;
+  suggested_sell_price: number | null;
+  stop_loss_price: number | null;
+  created_at: string;
+}
+
+function fmtPct(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "N/A";
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function riskStopLossRule(risk: string): string {
+  switch (risk) {
+    case "conservative":
+      return `Stop_loss 8–12% below current price. Prefer "hold" or "watch" over "sell" unless the long-term thesis is clearly broken.`;
+    case "aggressive":
+      return `Stop_loss 15–25% below current price. Tolerate large drawdowns as long as the multi-year thesis is intact.`;
+    default:
+      return `Stop_loss 10–18% below current price. Sell only on a confirmed long-term thesis break (death cross + lower lows on weekly).`;
+  }
+}
+
+function buildPrompt(
+  symbol: string,
+  quote: StockQuote,
+  daily: StockDailyData[],
+  prefs: UserPreferences,
+  positions: TransactionRecord[] = [],
+  prior: PriorSuggestion | null = null,
+): string {
   const sma20 = calcSMA(daily, 20);
-  const sma50 = calcSMA(daily, 50);
-  const sma200 = calcSMA(daily, 200);
   const rsi = calcRSI(daily, 14);
   const bb = calcBB(daily, 20, 2);
   const macd = calcMACD(daily);
-  const recent = daily.slice(-30);
+  const lt = buildLongTermMetrics(daily);
+  // Sample roughly weekly closes from the last 6 months as context
+  const sampled = daily.slice(-126).filter((_, i) => i % 5 === 0);
 
   const fmt = (n: number | null, prefix = "$") => n !== null ? `${prefix}${n.toFixed(2)}` : "N/A";
 
-  return `You are an expert financial analyst. Analyze ${symbol} for a ${prefs.risk_level} risk / ${prefs.investment_style} investor.
+  const priorBlock = prior
+    ? `## Your Prior Suggestion (${new Date(prior.created_at).toISOString().split("T")[0]})
+- Action: ${prior.action.toUpperCase()} | Signal: ${prior.signal_level}
+- Buy: ${fmt(prior.suggested_buy_price)} | Sell: ${fmt(prior.suggested_sell_price)} | Stop: ${fmt(prior.stop_loss_price)}
+- Reasoning: ${prior.reasoning}
+
+### Consistency rule (IMPORTANT)
+This is a LONG-TERM advisor. Do NOT flip your action ("buy" ↔ "sell") unless one of:
+  1. Trend regime changed (golden ↔ death cross), OR
+  2. Weekly RSI crossed into extreme territory (>80 or <25), OR
+  3. Price passed suggested_sell_price (take profit) or fell below stop_loss_price (thesis broken), OR
+  4. 1-year return has materially deteriorated since the last call.
+If none apply, KEEP the same action and explain why the thesis still holds.`
+    : `## Prior Suggestion\n(none — this is the first analysis)`;
+
+  return `You are an expert long-term investment advisor (Buffett/Lynch school). Produce a LONG-TERM recommendation for ${symbol}, aimed at a multi-month to multi-year holding period for a ${prefs.risk_level} risk investor.
+
+## Mandate
+- Time horizon: months to years. Daily/intraday noise does NOT change the call.
+- The long-term metrics block below is the PRIMARY input. Short-term indicators are CONTEXT only.
+- ${riskStopLossRule(prefs.risk_level)}
+- time_horizon must be expressed in months or years (e.g. "6–18 months", "1–3 years"). Never days or weeks.
+- Use "buy" only when the long-term trend is intact (golden cross OR clear basing pattern) AND weekly RSI isn't extremely overbought.
+- Use "hold" for existing positions where the long-term thesis is intact, even during short-term drawdowns.
+- Use "sell" only when the long-term thesis is broken (death cross + lower lows + deteriorating returns).
+- Use "watch" for stocks worth owning at a better price — specify the buy target.
 
 ## Current Quote
-- Price: ${fmt(quote.price)} | Change: ${fmt(quote.change)} (${quote.changePercent.toFixed(2)}%)
-- Open: ${fmt(quote.open)} | High: ${fmt(quote.high)} | Low: ${fmt(quote.low)}
+- Price: ${fmt(quote.price)} (day change ${quote.changePercent.toFixed(2)}%)
 - Prev Close: ${fmt(quote.previousClose)} | Volume: ${quote.volume.toLocaleString()}
 
-## Technical Indicators
-- SMA 20: ${fmt(sma20)} | SMA 50: ${fmt(sma50)} | SMA 200: ${fmt(sma200)}
-- RSI (14): ${rsi !== null ? rsi.toFixed(2) : "N/A"}
-- Bollinger Bands: Upper=${fmt(bb?.upper ?? null)}, Mid=${fmt(bb?.middle ?? null)}, Lower=${fmt(bb?.lower ?? null)}
-- MACD: ${macd ? macd.macd.toFixed(4) : "N/A"} | Signal: ${macd ? macd.signal.toFixed(4) : "N/A"}
+## Long-term Metrics (PRIMARY drivers)
+- Returns: 1m ${fmtPct(lt.return_1m)} · 3m ${fmtPct(lt.return_3m)} · 6m ${fmtPct(lt.return_6m)} · YTD ${fmtPct(lt.return_ytd)} · 1y ${fmtPct(lt.return_1y)} · 3y ${fmtPct(lt.return_3y)}
+- Weekly RSI(14): ${lt.rsi_weekly !== null ? lt.rsi_weekly.toFixed(1) : "N/A"}
+- SMA 50: ${fmt(lt.sma_50)} | SMA 200: ${fmt(lt.sma_200)}
+- Trend regime: ${lt.golden_cross ? "GOLDEN CROSS (long-term uptrend)" : "DEATH CROSS (long-term downtrend)"}
+- 52-week High: ${fmt(lt.high_52w)} | 52-week Low: ${fmt(lt.low_52w)}
+- Distance from 52w high: ${fmtPct(lt.distance_from_52w_high)}
+- Volume surge (30d / 1y): ${lt.volume_surge_ratio !== null ? lt.volume_surge_ratio.toFixed(2) + "x" : "N/A"}
 
-## Last 30 Days
-${recent.map((d) => `${d.date}: $${d.close.toFixed(2)} vol=${d.volume.toLocaleString()}`).join("\n")}
+## Short-term Context (do NOT let these dominate)
+- SMA 20: ${fmt(sma20)} | Daily RSI(14): ${rsi !== null ? rsi.toFixed(2) : "N/A"}
+- Bollinger Bands: Upper=${fmt(bb?.upper ?? null)} | Lower=${fmt(bb?.lower ?? null)}
+- MACD: ${macd ? macd.macd.toFixed(4) : "N/A"}
+
+## Sampled Closes (~weekly, last 6 months)
+${sampled.map((d) => `${d.date}: $${d.close.toFixed(2)}`).join("\n")}
+
+${priorBlock}
 
 ## Existing Positions
 ${positions.length > 0
@@ -242,9 +410,9 @@ ${positions.length > 0
     : "None"}
 
 ## Options Strategy Rules
-- If the user holds shares, suggest relevant options strategies (protective puts, covered calls, collars).
-- If the user holds options, factor in their expiry and strike when recommending actions.
-- Set options_strategy to null if no options play is relevant.
+- For long-term shareholders, prefer covered calls (income) or protective puts (hedge) over directional bets.
+- Avoid short-dated options — this is a long-term portfolio.
+- Set options_strategy to null when no long-term-friendly options play applies.
 
 ## Output
 Respond ONLY with a valid JSON object — no markdown, no code fences, no extra text:
@@ -252,11 +420,11 @@ Respond ONLY with a valid JSON object — no markdown, no code fences, no extra 
   "symbol": "${symbol}",
   "signal_level": "weak|medium|strong|very_strong",
   "action": "buy|sell|hold|watch",
-  "suggested_buy_price": <number or null>,
-  "suggested_sell_price": <number or null>,
-  "stop_loss_price": <number or null>,
+  "suggested_buy_price": <number or null — long-term buy target>,
+  "suggested_sell_price": <number or null — long-term take-profit target, typically 25–80% above current>,
+  "stop_loss_price": <number or null — per the stop-loss rule above>,
   "risk_estimation": "low|moderate|high|very_high",
-  "reasoning": "<2-3 sentences>",
+  "reasoning": "<2-3 sentences citing the long-term metrics. If keeping the prior action, say why the thesis still holds.>",
   "technical_summary": {
     "trend": "bullish|bearish|neutral|sideways",
     "support_levels": [<number>, <number>],
@@ -264,11 +432,11 @@ Respond ONLY with a valid JSON object — no markdown, no code fences, no extra 
     "key_indicators": "<brief summary>"
   },
   "confidence": <0.0 to 1.0>,
-  "time_horizon": "<e.g. 1-5 days>",
+  "time_horizon": "<months or years, e.g. '6–18 months' or '1–3 years'>",
   "options_strategy": {
-    "recommendation": "<1-2 sentence options recommendation, or null>",
+    "recommendation": "<1-2 sentence long-term-friendly options recommendation, or null>",
     "strategy_type": "protective_put|covered_call|collar|spread|none",
-    "details": "<specific strike/expiry suggestion, or null>"
+    "details": "<specific strike & expiry (prefer 60+ DTE), or null>"
   }
 }`;
 }
@@ -797,7 +965,7 @@ Deno.serve(async (req: Request) => {
             .eq("status", "active"),
           supabase
             .from("suggestions")
-            .select("action, technical_summary")
+            .select("action, signal_level, reasoning, suggested_buy_price, suggested_sell_price, stop_loss_price, technical_summary, created_at")
             .eq("user_id", user_id)
             .eq("symbol", symbol)
             .eq("is_active", true)
@@ -810,9 +978,20 @@ Deno.serve(async (req: Request) => {
         const positions: TransactionRecord[] = positionsRes.data ?? [];
         const prevAction = prevSuggestionRes.data?.action ?? null;
         const prevTrend = prevSuggestionRes.data?.technical_summary?.trend ?? null;
+        const priorForPrompt: PriorSuggestion | null = prevSuggestionRes.data
+          ? {
+              action: prevSuggestionRes.data.action,
+              signal_level: prevSuggestionRes.data.signal_level,
+              reasoning: prevSuggestionRes.data.reasoning,
+              suggested_buy_price: prevSuggestionRes.data.suggested_buy_price,
+              suggested_sell_price: prevSuggestionRes.data.suggested_sell_price,
+              stop_loss_price: prevSuggestionRes.data.stop_loss_price,
+              created_at: prevSuggestionRes.data.created_at,
+            }
+          : null;
 
-        // Build prompt with positions and call AI
-        const prompt = buildPrompt(symbol, quote, daily, prefs, positions);
+        // Build long-term prompt anchored to the prior suggestion
+        const prompt = buildPrompt(symbol, quote, daily, prefs, positions, priorForPrompt);
         const rawText = provider === "gemini"
           ? await callGemini(prompt)
           : await callGroq(prompt);
@@ -853,7 +1032,9 @@ Deno.serve(async (req: Request) => {
           exit_score: exitScore,
           exit_score_details: exitScoreDetails,
           is_active: true,
-          expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+          // Long-term cadence: suggestion valid until next daily run replaces it.
+          // 7d covers weekend gaps in cron schedule.
+          expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         });
 
         if (insertErr) throw new Error(insertErr.message);

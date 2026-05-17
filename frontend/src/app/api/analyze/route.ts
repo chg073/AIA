@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getStockQuote, getDailyData, calculateRSI } from "@/lib/alpha-vantage";
-import { analyzeStock } from "@/lib/gemini";
+import { analyzeStock, type PriorSuggestion } from "@/lib/gemini";
 import { computeExitScore } from "@/lib/exit-score";
 import type { Transaction, Profile, Suggestion, StockDailyData } from "@/types";
 
@@ -46,8 +46,9 @@ export async function POST(request: Request) {
       .eq("symbol", symbol.toUpperCase())
       .eq("status", "active");
 
-    // Check cache first (cache for 2 hours)
+    // Long-term cache window: quote 2h, daily history 24h (5y of data rarely changes)
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: cachedQuote } = await supabase
       .from("stock_data_cache")
       .select("*")
@@ -61,23 +62,21 @@ export async function POST(request: Request) {
       .select("*")
       .eq("symbol", symbol.toUpperCase())
       .eq("data_type", "daily")
-      .gte("fetched_at", twoHoursAgo)
+      .gte("fetched_at", oneDayAgo)
       .single();
 
     let quote, dailyData;
 
     if (cachedQuote && cachedDaily) {
-      // Use cached data
       quote = cachedQuote.data;
       dailyData = cachedDaily.data;
     } else {
-      // Fetch fresh data
+      // Fetch fresh data — long-term lens needs 5y of history for SMA200, weekly RSI, 1y/3y returns
       [quote, dailyData] = await Promise.all([
         getStockQuote(symbol.toUpperCase()),
-        getDailyData(symbol.toUpperCase()),
+        getDailyData(symbol.toUpperCase(), "longterm"),
       ]);
 
-      // Cache the data (upsert)
       await Promise.all([
         supabase.from("stock_data_cache").upsert(
           {
@@ -100,7 +99,30 @@ export async function POST(request: Request) {
       ]);
     }
 
-    // Run Gemini analysis
+    // Fetch prior active suggestion so the AI can stay consistent with its long-term call
+    const { data: priorSuggestion } = await supabase
+      .from("suggestions")
+      .select("action, signal_level, reasoning, suggested_buy_price, suggested_sell_price, stop_loss_price, created_at, technical_summary")
+      .eq("user_id", user.id)
+      .eq("symbol", symbol.toUpperCase())
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    const priorForPrompt: PriorSuggestion | null = priorSuggestion
+      ? {
+          action: priorSuggestion.action,
+          signal_level: priorSuggestion.signal_level,
+          reasoning: priorSuggestion.reasoning,
+          suggested_buy_price: priorSuggestion.suggested_buy_price,
+          suggested_sell_price: priorSuggestion.suggested_sell_price,
+          stop_loss_price: priorSuggestion.stop_loss_price,
+          created_at: priorSuggestion.created_at,
+        }
+      : null;
+
+    // Run AI analysis (long-term lens, anchored to prior suggestion)
     const analysis = await analyzeStock({
       symbol: symbol.toUpperCase(),
       stockData: dailyData as ReturnType<typeof getDailyData> extends Promise<infer T> ? T : never,
@@ -110,18 +132,8 @@ export async function POST(request: Request) {
         investment_style: (profile as Profile).investment_style,
       },
       existingPositions: (transactions || []) as Transaction[],
+      priorSuggestion: priorForPrompt,
     });
-
-    // Get previous suggestion trend for exit score comparison
-    const { data: prevSuggestion } = await supabase
-      .from("suggestions")
-      .select("technical_summary")
-      .eq("user_id", user.id)
-      .eq("symbol", symbol.toUpperCase())
-      .eq("is_active", true)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .single();
 
     const currentPrice = (quote as { price: number }).price;
     const dailyArr = dailyData as StockDailyData[];
@@ -135,7 +147,7 @@ export async function POST(request: Request) {
       resistanceLevels: analysis.technical_summary.resistance_levels ?? [],
       currentTrend: analysis.technical_summary.trend ?? "neutral",
       previousTrend:
-        (prevSuggestion?.technical_summary as Suggestion["technical_summary"])
+        (priorSuggestion?.technical_summary as Suggestion["technical_summary"])
           ?.trend ?? null,
       dailyData: dailyArr,
     });
@@ -169,8 +181,9 @@ export async function POST(request: Request) {
         exit_score: exitScore,
         exit_score_details: exitScoreDetails,
         is_active: true,
+        // Long-term suggestions: valid for 7 days (until the next weekly refresh)
         expires_at: new Date(
-          Date.now() + 24 * 60 * 60 * 1000
+          Date.now() + 7 * 24 * 60 * 60 * 1000
         ).toISOString(),
       })
       .select()

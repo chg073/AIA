@@ -9,6 +9,7 @@ import {
   List,
   Lightbulb,
   Briefcase,
+  Compass,
   Settings,
   LogOut,
   Menu,
@@ -17,6 +18,7 @@ import {
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/watchlist", label: "Watchlist", icon: List },
+  { href: "/dashboard/discover", label: "Discover", icon: Compass },
   { href: "/dashboard/suggestions", label: "Suggestions", icon: Lightbulb },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: Briefcase },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },

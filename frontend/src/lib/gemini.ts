@@ -16,11 +16,27 @@ import type {
   StockDailyData,
 } from "@/types";
 import {
+  buildLongTermMetrics,
   calculateBollingerBands,
   calculateMACD,
   calculateRSI,
   calculateSMA,
+  type LongTermMetrics,
 } from "./alpha-vantage";
+
+export interface PriorSuggestion {
+  action: string;
+  signal_level: string;
+  reasoning: string;
+  suggested_buy_price: number | null;
+  suggested_sell_price: number | null;
+  stop_loss_price: number | null;
+  created_at: string;
+}
+
+export interface LongTermAnalysisRequest extends AnalysisRequest {
+  priorSuggestion?: PriorSuggestion | null;
+}
 
 // ─── Provider detection ───────────────────────────────────────────────────────
 
@@ -63,88 +79,92 @@ export function buildTechnicalIndicators(data: StockDailyData[]) {
   };
 }
 
-function riskInstructions(risk: string): string {
+function riskStopLossRule(risk: string): string {
   switch (risk) {
     case "conservative":
-      return `- Only recommend "buy" when RSI < 35 AND price is near/below the lower Bollinger Band AND SMA trend is stable.
-- Set stop_loss_price tightly (1–2% below buy price).
-- Prefer "watch" or "hold" over "buy" when signals are ambiguous.
-- Set risk_estimation to "low" or "moderate" only; avoid "very_strong" signal levels.
-- Confidence threshold: only output confidence > 0.7 if multiple indicators align clearly.`;
+      return `Set stop_loss_price 8–12% below current price (trailing stop). Prefer "hold" or "watch" over "sell" unless the long-term thesis is clearly broken.`;
     case "aggressive":
-      return `- Accept higher volatility; recommend "buy" on strong momentum even if RSI is elevated.
-- Stop losses can be wider (4–8% below entry) to avoid premature exits on volatile stocks.
-- Actively suggest entries on breakouts above resistance with volume confirmation.
-- Can return "very_strong" signal levels when 2+ indicators align.
-- Higher confidence acceptable (0.6+) even with partial confirmation.`;
-    default: // moderate
-      return `- Balance risk and reward; recommend "buy" when RSI is between 40–60 and trend is confirmed by SMA.
-- Set stop_loss_price at 3–4% below buy price.
-- Use "strong" signal only when at least 2 indicators confirm the direction.
-- Confidence range: 0.5–0.8 based on signal clarity.`;
+      return `Stop_loss_price 15–25% below current price. Tolerate large drawdowns as long as the multi-year thesis is intact.`;
+    default:
+      return `Stop_loss_price 10–18% below current price. Sell only if the long-term thesis breaks (death cross + lower lows on the weekly chart).`;
   }
 }
 
-function styleInstructions(style: string): string {
-  switch (style) {
-    case "day_trading":
-      return `- Focus on intraday momentum: MACD crossovers, RSI extremes (>70 or <30), and Bollinger Band squeezes.
-- time_horizon must be "intraday" or "1–2 days".
-- suggested_buy_price and suggested_sell_price should be precise (within 0.5% of current price).
-- Ignore SMA 200 (irrelevant for intraday); weight MACD and volume heavily.
-- Flag very high volume spikes as entry signals.`;
-    case "long_term":
-      return `- Focus on macro trend: price vs SMA 200 position is the primary signal.
-- time_horizon must be "1–6 months" or longer.
-- Minor RSI fluctuations and short-term Bollinger Band touches are noise — ignore them.
-- Only recommend "buy" if price is above SMA 200 (or within 5% below it in a clear uptrend).
-- suggested_sell_price should target 15–30% gains; stop_loss_price should be 8–12% below entry.`;
-    default: // swing
-      return `- Focus on multi-day patterns: Bollinger Band bounces, RSI reversals from extremes, MACD crossovers.
-- time_horizon must be "3 days–4 weeks".
-- Weight SMA 20 and SMA 50 crossovers as key signals.
-- suggested_sell_price should target 5–15% gains from entry.
-- stop_loss_price should be 3–6% below entry.`;
-  }
+function fmtPct(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "N/A";
+  return `${(n * 100).toFixed(1)}%`;
 }
 
-function buildPrompt(request: AnalysisRequest): string {
+function buildLongTermBlock(m: LongTermMetrics): string {
+  return `## Long-term Metrics (use these as the PRIMARY drivers)
+- Returns: 1m ${fmtPct(m.return_1m)} · 3m ${fmtPct(m.return_3m)} · 6m ${fmtPct(m.return_6m)} · YTD ${fmtPct(m.return_ytd)} · 1y ${fmtPct(m.return_1y)} · 3y ${fmtPct(m.return_3y)}
+- Weekly RSI(14): ${m.rsi_weekly !== null ? m.rsi_weekly.toFixed(1) : "N/A"}
+- SMA 50: ${m.sma_50 !== null ? `$${m.sma_50.toFixed(2)}` : "N/A"} | SMA 200: ${m.sma_200 !== null ? `$${m.sma_200.toFixed(2)}` : "N/A"}
+- Trend regime: ${m.golden_cross ? "GOLDEN CROSS (long-term uptrend)" : "DEATH CROSS (long-term downtrend)"}${m.days_since_cross !== null ? ` — ${m.days_since_cross} days since last cross` : ""}
+- 52-week High: ${m.high_52w !== null ? `$${m.high_52w.toFixed(2)}` : "N/A"} | 52-week Low: ${m.low_52w !== null ? `$${m.low_52w.toFixed(2)}` : "N/A"}
+- Distance from 52w high: ${fmtPct(m.distance_from_52w_high)}
+- Volume surge (30d avg / 1y avg): ${m.volume_surge_ratio !== null ? m.volume_surge_ratio.toFixed(2) + "x" : "N/A"}`;
+}
+
+function buildPriorBlock(prior: PriorSuggestion | null | undefined): string {
+  if (!prior) return "## Prior Suggestion\n(none — first analysis)";
+  const date = new Date(prior.created_at).toISOString().split("T")[0];
+  return `## Your Prior Suggestion (${date})
+- Action: ${prior.action.toUpperCase()} | Signal: ${prior.signal_level}
+- Buy: ${prior.suggested_buy_price !== null ? `$${prior.suggested_buy_price.toFixed(2)}` : "N/A"} | Sell: ${prior.suggested_sell_price !== null ? `$${prior.suggested_sell_price.toFixed(2)}` : "N/A"} | Stop: ${prior.stop_loss_price !== null ? `$${prior.stop_loss_price.toFixed(2)}` : "N/A"}
+- Reasoning: ${prior.reasoning}
+
+### Consistency rule (IMPORTANT)
+- This is a LONG-TERM advisor. Do NOT flip your action ("buy" ↔ "sell") unless one of these is true:
+  1. The trend regime changed (golden ↔ death cross), OR
+  2. Weekly RSI crossed into extreme territory (>80 or <25), OR
+  3. Price is now beyond suggested_sell_price (take profit) or below stop_loss_price (thesis broken), OR
+  4. The 1-year return has materially deteriorated since the last call.
+- If none of the above, KEEP the same action and explain why the thesis still holds.
+- It is OK and expected to repeat "hold" or "watch" for weeks at a time.`;
+}
+
+function buildPrompt(request: LongTermAnalysisRequest): string {
   const ind = buildTechnicalIndicators(request.stockData);
-  const recentData = request.stockData.slice(-30);
-  const { risk_level, investment_style } = request.userPreferences;
+  const lt = buildLongTermMetrics(request.stockData);
+  // Sample weekly closes (every 5 trading days) over the last ~6 months for context
+  const sampled = request.stockData
+    .slice(-126)
+    .filter((_, i) => i % 5 === 0);
+  const { risk_level } = request.userPreferences;
 
-  return `You are an expert financial analyst. Analyze the stock data below and produce a recommendation STRICTLY tailored to this user's profile.
+  return `You are an expert long-term investment advisor (Buffett/Lynch school). Produce a LONG-TERM recommendation for ${request.symbol} aimed at a multi-month to multi-year holding period.
 
-## User Profile (these rules MUST govern your output)
-- Risk Level: ${risk_level}
-- Investment Style: ${investment_style}
-
-### Risk rules (${risk_level}):
-${riskInstructions(risk_level)}
-
-### Style rules (${investment_style}):
-${styleInstructions(investment_style)}
+## Mandate (these rules govern your output)
+- Time horizon is months to years. Daily/intraday noise does NOT change the call.
+- The long-term metrics block below is the PRIMARY input. The short-term indicators are CONTEXT only.
+- ${riskStopLossRule(risk_level)}
+- time_horizon must always be expressed in months or years (e.g. "6–18 months", "1–3 years"). Never "days" or "weeks".
+- Use "buy" only if the long-term trend is intact (golden cross OR clear basing pattern) AND the stock isn't extremely overbought on weekly RSI.
+- Use "hold" for existing positions where the long-term thesis is intact, even if there are short-term drawdowns.
+- Use "sell" only when the long-term thesis is broken (death cross + lower lows + deteriorating returns).
+- Use "watch" for stocks you'd like to own at a better price; specify the target buy price.
 
 ---
 
 ## Stock: ${request.symbol}
 
 ## Current Quote
-- Price: $${request.quote.price.toFixed(2)}
-- Day Change: $${request.quote.change.toFixed(2)} (${request.quote.changePercent.toFixed(2)}%)
-- Open: $${request.quote.open.toFixed(2)} | High: $${request.quote.high.toFixed(2)} | Low: $${request.quote.low.toFixed(2)}
+- Price: $${request.quote.price.toFixed(2)} (Day change ${request.quote.changePercent.toFixed(2)}%)
 - Prev Close: $${request.quote.previousClose.toFixed(2)} | Volume: ${request.quote.volume.toLocaleString()}
 
-## Technical Indicators
-- SMA 20: ${ind.sma_20 ? `$${ind.sma_20.toFixed(2)}` : "N/A"}
-- SMA 50: ${ind.sma_50 ? `$${ind.sma_50.toFixed(2)}` : "N/A"}
-- SMA 200: ${ind.sma_200 ? `$${ind.sma_200.toFixed(2)}` : "N/A"}
-- RSI (14): ${ind.rsi ? ind.rsi.toFixed(2) : "N/A"}
-- Bollinger Bands: Upper=${ind.bb ? `$${ind.bb.upper.toFixed(2)}` : "N/A"}, Mid=${ind.bb ? `$${ind.bb.middle.toFixed(2)}` : "N/A"}, Lower=${ind.bb ? `$${ind.bb.lower.toFixed(2)}` : "N/A"}
-- MACD: ${ind.macd ? ind.macd.macd.toFixed(4) : "N/A"} | Signal: ${ind.macd ? ind.macd.signal.toFixed(4) : "N/A"}
+${buildLongTermBlock(lt)}
 
-## Last 30 Days (Date, Close, Volume)
-${recentData.map((d) => `${d.date}: $${d.close.toFixed(2)} | ${d.volume.toLocaleString()}`).join("\n")}
+## Short-term Context (do NOT let these dominate)
+- SMA 20: ${ind.sma_20 ? `$${ind.sma_20.toFixed(2)}` : "N/A"}
+- Daily RSI (14): ${ind.rsi ? ind.rsi.toFixed(2) : "N/A"}
+- Bollinger Bands: Upper=${ind.bb ? `$${ind.bb.upper.toFixed(2)}` : "N/A"}, Lower=${ind.bb ? `$${ind.bb.lower.toFixed(2)}` : "N/A"}
+- MACD: ${ind.macd ? ind.macd.macd.toFixed(4) : "N/A"}
+
+## Sampled Closes (~weekly, last 6 months)
+${sampled.map((d) => `${d.date}: $${d.close.toFixed(2)}`).join("\n")}
+
+${buildPriorBlock(request.priorSuggestion)}
 
 ## Existing Positions
 ${request.existingPositions.length > 0
@@ -158,10 +178,9 @@ ${request.existingPositions.length > 0
     : "None"}
 
 ## Options Strategy Rules
-- If the user holds shares, suggest relevant options strategies: protective puts (to hedge downside), covered calls (to generate income), or collars (for range-bound protection).
-- If the user holds options, factor in their expiry date and strike price when recommending actions. Warn if expiry is approaching.
-- If the user has no position, you may suggest options as an alternative entry strategy (e.g., selling cash-secured puts).
-- Set options_strategy to null if no options play is relevant.
+- If the user holds shares long-term, prefer covered calls (income) or protective puts (downside hedge) over directional options.
+- Avoid recommending short-dated options as the primary play; this is a long-term portfolio.
+- Set options_strategy to null when no clear long-term-friendly options play applies.
 
 ## Output
 Respond ONLY with a valid JSON object — no markdown, no code fences, no extra text:
@@ -170,23 +189,23 @@ Respond ONLY with a valid JSON object — no markdown, no code fences, no extra 
   "symbol": "${request.symbol}",
   "signal_level": "weak|medium|strong|very_strong",
   "action": "buy|sell|hold|watch",
-  "suggested_buy_price": <number or null>,
-  "suggested_sell_price": <number or null>,
-  "stop_loss_price": <number or null>,
+  "suggested_buy_price": <number or null — a price you'd be a long-term buyer at>,
+  "suggested_sell_price": <number or null — long-term take-profit target, typically 25–80% above current>,
+  "stop_loss_price": <number or null — per the stop-loss rule above>,
   "risk_estimation": "low|moderate|high|very_high",
-  "reasoning": "<2-3 sentences referencing both the technicals AND this user's ${risk_level} risk / ${investment_style} style>",
+  "reasoning": "<2-3 sentences citing the long-term metrics. If you are keeping the prior action, explicitly say why the thesis still holds.>",
   "technical_summary": {
     "trend": "bullish|bearish|neutral|sideways",
     "support_levels": [<number>, <number>],
     "resistance_levels": [<number>, <number>],
-    "key_indicators": "<brief summary of which indicators drove this recommendation>"
+    "key_indicators": "<brief summary of which long-term indicators drove this recommendation>"
   },
   "confidence": <0.0 to 1.0>,
-  "time_horizon": "<must match the ${investment_style} style rules above>",
+  "time_horizon": "<months or years, e.g. '6–18 months' or '1–3 years'>",
   "options_strategy": {
-    "recommendation": "<1-2 sentence options recommendation, or null if none>",
+    "recommendation": "<1-2 sentence long-term-friendly options recommendation, or null>",
     "strategy_type": "protective_put|covered_call|collar|spread|none",
-    "details": "<specific strike, expiry suggestion, premium estimate if applicable, or null>"
+    "details": "<specific strike & expiry (prefer 60+ DTE), or null>"
   }
 }`;
 }
@@ -329,7 +348,7 @@ function parseJsonResponse(text: string): AnalysisResponse {
 
 // ─── Groq provider ────────────────────────────────────────────────────────────
 
-async function analyzeWithGroq(request: AnalysisRequest): Promise<AnalysisResponse> {
+async function analyzeWithGroq(request: LongTermAnalysisRequest): Promise<AnalysisResponse> {
   const apiKey = getGroqKey();
   const prompt = buildPrompt(request);
 
@@ -401,7 +420,7 @@ async function listAvailableModels(apiKey: string): Promise<GeminiModel[]> {
   throw new Error("Could not reach Gemini API to list models. Check your network connection.");
 }
 
-async function analyzeWithGemini(request: AnalysisRequest): Promise<AnalysisResponse> {
+async function analyzeWithGemini(request: LongTermAnalysisRequest): Promise<AnalysisResponse> {
   const apiKey = getGeminiKey();
   const prompt = buildPrompt(request);
 
@@ -530,7 +549,7 @@ function rankModels(available: GeminiModel[]): string[] {
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-export async function analyzeStock(request: AnalysisRequest): Promise<AnalysisResponse> {
+export async function analyzeStock(request: LongTermAnalysisRequest): Promise<AnalysisResponse> {
   const provider = getProvider();
   if (provider === "gemini") {
     return analyzeWithGemini(request);

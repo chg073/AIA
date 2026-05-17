@@ -138,6 +138,35 @@ export interface Transaction {
   created_at: string;
 }
 
+export type DiscoveryStatus = "new" | "added" | "dismissed";
+
+export interface Discovery {
+  id: string;
+  user_id: string;
+  symbol: string;
+  company_name: string | null;
+  current_price: number | null;
+  market_cap: number | null;
+  return_1m: number | null;
+  return_3m: number | null;
+  return_6m: number | null;
+  return_1y: number | null;
+  return_3y: number | null;
+  return_ytd: number | null;
+  rsi_weekly: number | null;
+  distance_from_52w_high: number | null;
+  volume_surge_ratio: number | null;
+  momentum_score: number | null;
+  ai_thesis: string | null;
+  ai_risk: string | null;
+  ai_recommended: boolean;
+  ai_horizon: string | null;
+  source: string | null;
+  status: DiscoveryStatus;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StockDataCache {
   id: string;
   symbol: string;
