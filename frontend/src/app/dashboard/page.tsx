@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import { formatCurrency, getSignalColor, getActionColor } from "@/lib/utils";
 import Link from "next/link";
+import LiveQuote from "@/components/LiveQuote";
+import MarketOutlookCard from "@/components/MarketOutlookCard";
 import type { Suggestion, Transaction, WatchlistItem } from "@/types";
 
 export default async function DashboardPage() {
@@ -63,6 +65,9 @@ export default async function DashboardPage() {
           Your investment overview at a glance
         </p>
       </div>
+
+      {/* Top-level "Should I buy?" view */}
+      <MarketOutlookCard />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -138,11 +143,13 @@ export default async function DashboardPage() {
                     >
                       {suggestion.signal_level.replace("_", " ").toUpperCase()}
                     </span>
-                    {suggestion.current_price && (
-                      <p className="text-xs text-muted-foreground">
-                        {formatCurrency(suggestion.current_price)}
-                      </p>
-                    )}
+                    <div className="mt-0.5">
+                      <LiveQuote
+                        symbol={suggestion.symbol}
+                        analyzedPrice={suggestion.current_price}
+                        variant="compact"
+                      />
+                    </div>
                   </div>
                 </div>
               ))}
@@ -238,6 +245,9 @@ export default async function DashboardPage() {
                 <p className="text-xs text-muted-foreground truncate">
                   {item.company_name || item.symbol}
                 </p>
+                <div className="mt-1">
+                  <LiveQuote symbol={item.symbol} variant="compact" />
+                </div>
               </div>
             ))}
           </div>

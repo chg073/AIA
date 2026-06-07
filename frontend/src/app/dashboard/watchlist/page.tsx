@@ -11,6 +11,7 @@ import {
   Eye,
   RefreshCw,
 } from "lucide-react";
+import LiveQuote from "@/components/LiveQuote";
 import type { WatchlistItem } from "@/types";
 
 export default function WatchlistPage() {
@@ -221,6 +222,7 @@ export default function WatchlistPage() {
               <tr className="border-b border-border text-left text-sm text-muted-foreground">
                 <th className="px-6 py-3 font-medium">Symbol</th>
                 <th className="px-6 py-3 font-medium">Company</th>
+                <th className="px-6 py-3 font-medium">Live Price</th>
                 <th className="px-6 py-3 font-medium">Added</th>
                 <th className="px-6 py-3 font-medium">Status</th>
                 <th className="px-6 py-3 font-medium text-right">Actions</th>
@@ -237,6 +239,9 @@ export default function WatchlistPage() {
                   </td>
                   <td className="px-6 py-4 text-muted-foreground">
                     {item.company_name || "—"}
+                  </td>
+                  <td className="px-6 py-4">
+                    <LiveQuote symbol={item.symbol} variant="compact" />
                   </td>
                   <td className="px-6 py-4 text-muted-foreground text-sm">
                     {new Date(item.added_at).toLocaleDateString()}

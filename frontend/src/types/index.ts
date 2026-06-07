@@ -167,6 +167,52 @@ export interface Discovery {
   updated_at: string;
 }
 
+export type OverallStance =
+  | "deploy_capital"
+  | "cautious_buy"
+  | "hold"
+  | "defensive"
+  | "reduce_exposure";
+
+export type MarketRegime = "bull" | "bear" | "transitional";
+
+export interface OutlookPriority {
+  symbol: string;
+  action: string;
+  why: string;
+}
+
+export interface MarketOutlook {
+  id: string;
+  user_id: string;
+  market_regime: MarketRegime | null;
+  spy_price: number | null;
+  spy_return_ytd: number | null;
+  spy_return_1y: number | null;
+  spy_above_sma200: boolean | null;
+  spy_rsi_weekly: number | null;
+  buy_signals: number;
+  hold_signals: number;
+  sell_signals: number;
+  watch_signals: number;
+  avg_exit_score: number | null;
+  watchlist_size: number;
+  overall_stance: OverallStance | null;
+  headline: string | null;
+  reasoning: string | null;
+  top_priorities: OutlookPriority[];
+  cash_recommendation: string | null;
+  created_at: string;
+}
+
+export interface LiveQuote {
+  symbol: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  previousClose: number;
+}
+
 export interface StockDataCache {
   id: string;
   symbol: string;

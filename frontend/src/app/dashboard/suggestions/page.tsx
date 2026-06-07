@@ -25,6 +25,7 @@ import {
   getActionColor,
 } from "@/lib/utils";
 import { getExitScoreLabel, getExitScoreBgColor } from "@/lib/exit-score";
+import LiveQuote from "@/components/LiveQuote";
 import type { Suggestion, SuggestionMessage, Transaction } from "@/types";
 
 interface CompanyGroup {
@@ -328,11 +329,11 @@ function CompanyCard({
           </div>
         </div>
         <div className="flex items-center gap-4 text-sm">
-          {s.current_price && (
-            <span className="text-muted-foreground">
-              {formatCurrency(s.current_price)}
-            </span>
-          )}
+          <LiveQuote
+            symbol={s.symbol}
+            analyzedPrice={s.current_price}
+            variant="full"
+          />
           {s.confidence && (
             <span className="text-muted-foreground">
               {Math.round(s.confidence * 100)}% conf
@@ -605,7 +606,7 @@ function CompanyCard({
                 </span>
                 {h.current_price && (
                   <span className="text-muted-foreground">
-                    {formatCurrency(h.current_price)}
+                    @ {formatCurrency(h.current_price)}
                   </span>
                 )}
               </div>
